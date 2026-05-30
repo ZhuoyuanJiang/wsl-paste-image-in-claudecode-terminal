@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# claude-clip-bridge — make Win+Shift+S screenshots paste into Claude Code (WSL) via Alt+V.
+#
+# The problem:
+#   WSLg copies Windows screenshots onto the WSL/Wayland clipboard as an old BMP
+#   variant (BI_BITFIELDS). Claude Code's image decoder cannot read it, so Alt+V
+#   reports "No image found in clipboard".
+#
+# This fix (pure Linux — no Windows interop needed):
+#   Watch the Wayland clipboard. Whenever it holds an image that is NOT already
+#   image/png, decode it with Python/Pillow and re-publish it as image/png, which
+#   Claude Code's Alt+V handler accepts. WSLg sometimes overwrites our PNG back to
+#   BMP ~0.5s later, so we re-assert a few times, then leave it alone.
+#
+#   Only IMAGES are touched. Text on the clipboard is never modified.
+#
+# Usage:
+#   claude-clip-bridge            # run in foreground (Ctrl+C to stop)
+#   claude-clip-bridge --status   # is a bridge already running?
+#   claude-clip-bridge --stop     # stop a backgrounded bridge
+#   claude-clip-bridge --once     # convert the current clipboard image once and exit (for testing)
+#   claude-clip-bridge --help
+
+set -uo pipefail
+
+CACHE_DIR="${HOME}/.cache/claude-clip-bridge"
+PID_FILE="${CACHE_DIR}/bridge.pid"
+LOG_FILE="${CACHE_DIR}/bridge.log"
+POLL_SECONDS="${CLAUDE_CLIP_POLL:-0.4}"
+MAX_REASSERT=4                      # times we re-push the same image if WSLg keeps dropping it
+mkdir -p "$CACHE_DIR"
+
+log() { echo "[$(date -Is)] $*" >> "$LOG_FILE"; }
+
+# Decode whatever image bytes arrive on stdin and emit PNG on stdout. Pillow
+# handles the BI_BITFIELDS BMP that breaks Claude Code's own decoder.
+PY_CONVERT='import sys,io
+from PIL import Image
+data = sys.stdin.buffer.read()
+img = Image.open(io.BytesIO(data))
+img.load()
+if img.mode not in ("RGB", "RGBA", "L"):
+    img = img.convert("RGBA")
+img.save(sys.stdout.buffer, "PNG")'
+
+clipboard_image_types() { wl-paste --list-types 2>/dev/null; }
+
+# Echo the best source image MIME type to convert from, or nothing.
+pick_source_type() {
+    local types="$1"
+    # Prefer BMP (what WSLg gives), then any other non-png image type.
+    grep -qx 'image/bmp' <<<"$types" && { echo 'image/bmp'; return; }
+    grep '^image/' <<<"$types" | grep -vx 'image/png' | head -1
+}
+
+convert_once() {
+    # Reads current clipboard image, writes PNG to $1. Returns 0 on success.
+    local out="$1" types src
+    types="$(clipboard_image_types)"
+    src="$(pick_source_type "$types")"
+    [[ -n "$src" ]] || { log "no convertible image type (types: $(tr '\n' ',' <<<"$types"))"; return 1; }
+    if wl-paste --type "$src" 2>>"$LOG_FILE" | python3 -c "$PY_CONVERT" > "$out" 2>>"$LOG_FILE" && [[ -s "$out" ]]; then
+        return 0
+    fi
+    log "conversion failed from $src"
+    return 1
+}
+
+case "${1:-}" in
+    --stop|stop)
+        if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            kill "$(cat "$PID_FILE")" && echo "stopped (pid $(cat "$PID_FILE"))"
+        else
+            echo "not running"
+        fi
+        rm -f "$PID_FILE"; exit 0 ;;
+    --status|status)
+        if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            echo "running (pid $(cat "$PID_FILE"))"
+        else
+            echo "stopped"
+        fi; exit 0 ;;
+    --once)
+        for c in wl-paste python3; do command -v "$c" >/dev/null || { echo "missing: $c" >&2; exit 1; }; done
+        tmp="$(mktemp "${CACHE_DIR}/once-XXXX.png")"
+        if convert_once "$tmp"; then
+            command -v wl-copy >/dev/null && wl-copy --type image/png < "$tmp"
+            echo "OK: converted current clipboard image -> $tmp ($(stat -c %s "$tmp") bytes), re-published as image/png"
+        else
+            echo "FAILED: could not convert current clipboard image (see $LOG_FILE)"; exit 1
+        fi
+        exit 0 ;;
+    --help|-h|help)
+        sed -n '2,/^set -u/p' "$0" | sed -e 's/^# \{0,1\}//' -e '$d'; exit 0 ;;
+esac
+
+# --- prereqs ---
+for cmd in wl-copy wl-paste python3; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+        echo "missing: $cmd" >&2
+        [[ "$cmd" == wl-* ]] && echo "  install with: sudo apt install wl-clipboard" >&2
+        exit 1
+    }
+done
+python3 -c 'import PIL' 2>/dev/null || { echo "missing: Python Pillow (pip install Pillow)" >&2; exit 1; }
+
+# single instance
+if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "already running (pid $(cat "$PID_FILE")). Use: claude-clip-bridge --stop" >&2; exit 1
+fi
+echo $$ > "$PID_FILE"
+trap 'rm -f "$PID_FILE"; log "bridge stopped"; exit 0' INT TERM EXIT
+
+rm -f "$CACHE_DIR"/clip-*.png 2>/dev/null
+log "bridge started (poll=${POLL_SECONDS}s)"
+echo "claude-clip-bridge running (pid $$). Take a screenshot (Win+Shift+S), then Alt+V in Claude Code."
+echo "Logs: $LOG_FILE   |   Stop: claude-clip-bridge --stop"
+
+active_hash=""
+same_count=0
+PNG="${CACHE_DIR}/clip-current.png"
+
+while true; do
+    types="$(clipboard_image_types)"
+    if grep -q '^image/' <<<"$types"; then
+        if grep -qx 'image/png' <<<"$types"; then
+            # A PNG is already on the clipboard (ours, or a genuine PNG copy).
+            # Consider it settled and reset the re-assert counter.
+            same_count=0
+        else
+            # Image present but no PNG -> the broken-BMP case. Convert + publish.
+            if convert_once "$PNG"; then
+                hash="$(sha256sum "$PNG" | cut -d' ' -f1)"
+                if [[ "$hash" == "$active_hash" ]]; then
+                    same_count=$((same_count + 1))
+                else
+                    active_hash="$hash"; same_count=1
+                fi
+                if (( same_count <= MAX_REASSERT )); then
+                    wl-copy --type image/png < "$PNG" 2>>"$LOG_FILE"
+                    log "published image/png (hash ${hash:0:8}, attempt ${same_count})"
+                fi
+                # else: stop fighting WSLg for this image to avoid a busy loop.
+            fi
+        fi
+    fi
+    sleep "$POLL_SECONDS"
+done
