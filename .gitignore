@@ -1,0 +1,4 @@
+# Demo source/working files — keep the repo lean; only the GIF is committed.
+docs/*.mp4
+docs/annotate.sh
+docs/cap*.txt

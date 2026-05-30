@@ -2,6 +2,8 @@
 
 **Take a screenshot with `Win+Shift+S`, press `Alt+V`, and it pastes straight into Claude Code — on WSL, with no Windows `.exe` needed.**
 
+![demo: Win+Shift+S then Alt+V pastes the screenshot into Claude Code](docs/paste_image_in_claude_code_in_WSL_demo.gif)
+
 ---
 
 ## The problem
@@ -135,3 +137,7 @@ MIT — see [LICENSE](LICENSE). Contributions and issues welcome.
 ## Acknowledgements
 
 The `BI_BITFIELDS` BMP root cause is discussed in the WSL/Claude Code community, e.g. [anthropics/claude-code#50552](https://github.com/anthropics/claude-code/issues/50552) and [rajveerb/wsl-clip-bridge](https://github.com/rajveerb/wsl-clip-bridge). This project's angle is a **pure-Linux** fix that needs no Windows interop.
+
+---
+
+<h3 align="center">⭐ If this saved you some time, a star or a link back is appreciated!</h3>
