@@ -81,12 +81,18 @@ claude-clip-bridge --help
 ## Stopping it
 
 ```bash
-claude-clip-bridge --stop      # stop the background helper
+claude-clip-bridge --stop      # stop the background helper for now
 # or, equivalently:
 pkill -f claude-clip-bridge
 ```
 
-Note: if you installed with `--autostart`, opening a **new** terminal will start it again — that's intended (you usually want it always available). To remove it for good, see Uninstall below.
+These stop it immediately, but if you installed with `--autostart` it comes back when you open a **new** terminal (usually what you want). To keep it off across new terminals without uninstalling:
+
+```bash
+claude-clip-bridge --disable   # stop + remove autostart   (run --enable to undo)
+```
+
+To remove it completely, see Uninstall below.
 
 ---
 

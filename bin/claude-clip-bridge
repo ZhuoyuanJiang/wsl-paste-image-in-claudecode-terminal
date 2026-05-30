@@ -17,7 +17,9 @@
 # Usage:
 #   claude-clip-bridge            # run in foreground (Ctrl+C to stop)
 #   claude-clip-bridge --status   # is a bridge already running?
-#   claude-clip-bridge --stop     # stop a backgrounded bridge
+#   claude-clip-bridge --stop     # stop the background bridge (autostart relaunches it in a new shell)
+#   claude-clip-bridge --disable  # stop AND remove autostart, so it stays off across new shells
+#   claude-clip-bridge --enable   # add autostart and start it now
 #   claude-clip-bridge --once     # convert the current clipboard image once and exit (for testing)
 #   claude-clip-bridge --help
 
@@ -28,6 +30,8 @@ PID_FILE="${CACHE_DIR}/bridge.pid"
 LOG_FILE="${CACHE_DIR}/bridge.log"
 POLL_SECONDS="${CLAUDE_CLIP_POLL:-0.4}"
 MAX_REASSERT=4                      # times we re-push the same image if WSLg keeps dropping it
+RC_FILE="${HOME}/.bashrc"
+AUTOSTART_MARKER="# claude-clip-bridge autostart"
 mkdir -p "$CACHE_DIR"
 
 log() { echo "[$(date -Is)] $*" >> "$LOG_FILE"; }
@@ -66,6 +70,32 @@ convert_once() {
     return 1
 }
 
+# Remove the autostart block from ~/.bashrc (backup first). Returns 0 if removed.
+remove_autostart() {
+    grep -qF "$AUTOSTART_MARKER" "$RC_FILE" 2>/dev/null || return 1
+    cp "$RC_FILE" "${RC_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
+    python3 - "$RC_FILE" <<'PY'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+s = re.sub(r"\n?# claude-clip-bridge autostart.*?\nif \[ -n \"\$WAYLAND_DISPLAY\".*?\n    fi\nfi\n", "\n", s, flags=re.DOTALL)
+open(p, "w").write(s)
+PY
+}
+
+# Append the autostart block to ~/.bashrc if absent. Returns 0 if added.
+add_autostart() {
+    grep -qF "$AUTOSTART_MARKER" "$RC_FILE" 2>/dev/null && return 1
+    cat >> "$RC_FILE" <<'BASHRC'
+
+# claude-clip-bridge autostart
+if [ -n "$WAYLAND_DISPLAY" ] && command -v claude-clip-bridge >/dev/null 2>&1; then
+    if ! claude-clip-bridge --status 2>/dev/null | grep -q running; then
+        nohup claude-clip-bridge >/dev/null 2>&1 & disown
+    fi
+fi
+BASHRC
+}
+
 case "${1:-}" in
     --stop|stop)
         if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
@@ -88,6 +118,25 @@ case "${1:-}" in
             echo "OK: converted current clipboard image -> $tmp ($(stat -c %s "$tmp") bytes), re-published as image/png"
         else
             echo "FAILED: could not convert current clipboard image (see $LOG_FILE)"; exit 1
+        fi
+        exit 0 ;;
+    --disable)
+        if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then kill "$(cat "$PID_FILE")" 2>/dev/null; fi
+        rm -f "$PID_FILE"
+        if remove_autostart; then
+            echo "disabled: stopped and removed autostart from ~/.bashrc (backup saved)."
+            echo "It won't come back in new terminals. Re-enable with: claude-clip-bridge --enable"
+        else
+            echo "stopped. (no autostart entry was present in ~/.bashrc)"
+        fi
+        exit 0 ;;
+    --enable)
+        if add_autostart; then echo "enabled: autostart added to ~/.bashrc"; else echo "autostart already set in ~/.bashrc"; fi
+        if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            echo "already running (pid $(cat "$PID_FILE"))"
+        else
+            nohup "$0" >/dev/null 2>&1 & disown
+            echo "started in background."
         fi
         exit 0 ;;
     --help|-h|help)
